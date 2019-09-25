@@ -1,0 +1,503 @@
+---
+title: "Computational Search for Toxicologically Relevant NR's TF's using Machine Learning"
+output: html_notebook
+---
+
+The genes of interest are:
+CYP … 3A4, 2C9, 2C8, 2E1, 1A2
+
+2A6, 2D6, 2B6, 2C19, 3A5
+
+2J2, 1A1, and 1B1
+
+Agnostic
+Pipeline:
+Download Encode Acessible Regions in Liver ->
+Extract Sequences using BED and DEEP TOOL -> 
+DREME-Chip Search for Binding Motifs ->
+Cross Reference With ChipSeq Data -> 
+Visualize using cytoscape
+
+Literature Based
+Pipeline:
+Download Accessible Regions Using Cytoscape -> 
+Extract Sequencess using BED and DEEP TOOL -> 
+Cross Reference with JASPAR with Known TF's ->
+Cytoscape visualizaiton
+
+This will be the proof of concept
+Eventually we want to replace Step 3 of each pipeline with a Machine Learning Classifier
+
+Possible Future Ideas:
+TF Prediction -> SNP cataloging -> Precision Medicine Experimental Validation
+
+SNP Predictive Algorithms?
+
+
+Extracting Transcription Binding Candidates (TBC)
+
+Setting Up dependencies
+```{r}
+library(biomaRt)
+library(dplyr)
+library(tidyverse)
+library(seqinr)
+library(Biostrings)
+library(TFBSTools)
+library(seqLogo)
+library(JASPAR2018)
+library(reshape2)
+library(ggplot2)
+library(nucleR)
+library(rtracklayer)
+```
+Getting Gene Coordinates
+```{r}
+mart <- useMart(biomart="ENSEMBL_MART_ENSEMBL", host="grch37.ensembl.org", path="/biomart/martservice", dataset="hsapiens_gene_ensembl")
+#Genes of interest
+cyp <- c('ENSG00000160868','ENSG00000138109','ENSG00000138115','ENSG00000130649','ENSG00000140505','ENSG00000255974','ENSG00000100197','ENSG00000197408','ENSG00000165841','ENSG00000106258','ENSG00000134716','ENSG00000140465','ENSG00000138061')
+#Getting gene annotation
+ann <- getBM(c("hgnc_symbol","description","chromosome_name","band","strand","start_position","end_position","ensembl_gene_id"), "ensembl_gene_id", cyp, mart)
+```
+
+```{r}
+gen_loc <- ann  %>%
+  select(c('chromosome_name', 'start_position', 'end_position', 'ensembl_gene_id'))
+gen_loc$chromosome_name <- paste('chr', gen_loc$chromosome_name, sep = '')
+```
+
+Loading DNA accessibility data from following Encode Data Sets:
+ENCSR149XIL
+ENCSR555QAY
+ENCSR000ENP
+ENCSR000DCH
+ENCSR373TDL
+ENCSR000DCW
+
+```{r}
+file <- '~/Documents/sudin_pipeline/data/liver_euchormatin/ENCFF435SDA_Hg19_HepG2_DNaseISeq.bed.gz'
+
+nar_pek_var <- c('chrom', 'chromstart', 'chromend', 'name', 'score','strand', 'signalvalue', 'pvalue', 'qvalue', 'peak')
+tbc <- read_tsv(file, col_names = nar_pek_var)
+```
+All at once relevant TBC for each gene
+```{r}
+cyp_reg <- c()
+for (i in 1:length(gen_loc$chromosome_name)){
+  j <- filter(tbc, chrom == gen_loc[[i, 1]] & chromstart > gen_loc[[i, 2]]-10000 & chromend < gen_loc[[i, 3]]+10000) 
+  cyp_reg <- c(cyp_reg, j)
+}
+```
+Building frequency tibble for plotting to find appropriate proximal upstream and downstream lengths for calculating
+```{r}
+bounds <- seq(1000, 20000, 1000)
+dat <- tibble()
+for (i in bounds){
+  for (j in 1:length(gen_loc$chromosome_name)){
+    r <- nrow(filter(tbc, chrom == gen_loc[[j, 1]] & chromstart > gen_loc[[j, 2]]-i & chromend < gen_loc[[j, 3]]+i))
+    dat <- bind_rows(dat, c(freq = r, bound = i, gene = gen_loc[[j, 4]]))
+  }
+}
+dat$bound <- as.numeric(dat$bound)
+dat$freq <- as.numeric(dat$freq)
+```
+Building stacked bargraph to visualize TBC frequency at differing proximal lengths
+```{r}
+ggplot(dat, aes(x = bound,y = freq,  fill = gene)) + 
+  geom_histogram(stat = 'identity') +
+  ylab("DHS Relative Frequency") +
+  xlab("Downstream/Upstream Region Size (bps)")
+```
+
+```{r}
+ggplot(dat, aes(x = bound,y = freq/50,  fill = gene)) + 
+  geom_histogram(stat = 'identity') +
+  ylab("DHS Relative Frequency") +
+  xlab("Downstream/Upstream Region Size (bps)")
+```
+I will use 10K bps as my proximal regions of interest.
+
+So  now I want to use Jaspar to cross refercene TF's of interest against the regions of interest.
+I now need to write up my TF's of interest and then use Jaspar to find those motifs.
+
+In the meantime we can use Meme-Chip to find these Denovo
+
+So now we need to create a system that will download the DNA based on some gene coordinates [chr[i], start, end]
+
+To do that we will read from 2bit files to reduce memory strain
+
+Test getting sequence from genome 
+```{r}
+genome <- TwoBitFile('../data/hg19.2bit')
+test_loc <- GRanges('chr10', IRanges(12129441, 12129591))
+test_seq <- as.character(import(genome, which = test_loc))
+```
+Trying to get all regulatory regions
+```{r}
+reg_seqs_vec <- tibble()
+for (i in 1:length(gen_loc$chromosome_name)){
+  j <- filter(tbc, chrom == gen_loc[[i, 1]] & chromstart > gen_loc[[i, 2]]-10000 & chromend < gen_loc[[i, 3]]+10000) 
+  gene <- gen_loc[[i,4]]
+  locs <- GRanges(j$chrom, IRanges(j$chromstart, j$chromend))
+  seqs <- as.character(import(genome, which = locs))
+  if (length(seqs) > 0){
+    reg_seqs_vec <- bind_rows(reg_seqs_vec, tibble(rep(gene,length(seqs)), seqs))
+  }
+}
+colnames(reg_seqs_vec) <- c('ensemblID', 'Sequence')
+```
+Getting Distal Elements
+```{r}
+tbde <- read_tsv('../data/allGeneCorrelations100000.p05_v3.txt')
+cyp_names <- c('CYP3A4','CYP2C9','CYP2C8','CYP2E1','CYP1A2','CYP2A6','CYP2D6','CYP2B6','CYP2C19','CYP3A5','CYP2J2','CYP1A1','CYP1B1')
+de <- tbde %>%
+  filter(grepl(pattern = paste(cyp_names,collapse ='|'), x = gene_name, ignore.case = TRUE)) %>%
+  filter(!gene_name == 'CYP3A43') %>%
+  filter(pval < 0.05)
+```
+```{r}
+ensemblID <- tibble(de$ensemblID)
+loc <- GRanges(de$dhs_chr, IRanges(de$dhs_start,de$dhs_end))
+sequences <- tibble(as.character(import(genome, which = loc)))
+de_seqs_vec <- cbind(ensemblID, sequences)
+colnames(de_seqs_vec) <- c('ensemblID', 'sequence')
+```
+
+Finding Motifs from Jaspar for relevant TFS:
+ESR1, NR3C1, RARA, HNF4A, CAR, PXR, VDR, PPARA, AHR
+CAR abd PXR were not found from JASPAR 2018 : Will need to see
+
+I want to get the data for the TF's above
+
+I want to get all of them
+This script is missing CAR, PXR
+```{r}
+#Getting PWM for each TF binding site
+tf <- c('ESR1', 'NR3C1', 'RARA','RARA(var.2)', 'RARA::RXRA', 'PPARA::RXRA', 'HNF4A', 'VDR','RXRA::VDR', 'Ahr::Arnt')
+tf_pfm <- c()
+tf_pwm <- c()
+for (i in 1:length(tf)){
+  tf_pfm <- getMatrixByName(JASPAR2018, tf[i])
+  tf_pwm <- c(tf_pwm, toPWM(tf_pfm))
+}
+#For CAR NR
+#Hosada et. al
+require(ggseqlogo)
+hosadaFile <- '../data/car_binding_sites_hosoda.tsv'
+hosadaFileHeader <- c('number', 'loc', 'len', 'bs', 'motif', 'compete10', 'compete100')
+hCarHosada <- read_tsv(hosadaFile, col_names = hosadaFileHeader, skip = 1)
+hCarHosada <- filter(hCarHosada,  !is.na(bs))
+hCarHosada <- mutate_all(hCarHosada, .funs=toupper)
+siteSeqs <- hCarHosada$bs
+#Make Postion Frequency Matrix
+countMatrix <- consensusMatrix(siteSeqs)
+pfm <- PFMatrix(ID = 'CAR', name = 'CAR-RXRA', profileMatrix = countMatrix)
+ggseqlogo(countMatrix)
+pwm <- toPWM(pfm)
+tf_PWM <- c(tf_pwm, pwm)
+```
+Putting all the data together for analysis
+```{r}
+#Concatenating all my data
+#DE Data
+cyp_reg_data <- tibble(reg_gene = de_seqs_vec$ensemblID,
+                       seq = de_seqs_vec$sequence,
+                       dhs_chrom = de$dhs_chr,
+                       dhs_start = de$dhs_start,
+                       dhs_end = de$dhs_end,
+                       de = 1
+)
+#+/- 10000 bp region
+for (i in 1:length(gen_loc$chromosome_name)){
+  j <- filter(tbc, chrom == gen_loc[[i, 1]] & chromstart > gen_loc[[i, 2]]-10000 & chromend < gen_loc[[i, 3]]+10000) 
+  gene <- gen_loc[[i,4]]
+  locs <- GRanges(j$chrom, IRanges(j$chromstart, j$chromend))
+  seqs <- as.character(import(genome, which = locs))
+  if (length(seqs) > 0){
+    k <- tibble(reg_gene = gen_loc$ensembl_gene_id[i],
+           seq = seqs,
+           dhs_chrom = j$chrom,
+           dhs_start = j$chromstart,
+           dhs_end = j$chromend,
+           de = 0
+    )
+    cyp_reg_data <- rbind(cyp_reg_data, k)
+  }
+}
+```
+
+Since we are illustrating the problem we will use unaltered PWMs
+There will be a relaxed PWM to create a wider "net"
+```{r}
+tf <- c('ESR1', 'NR3C1', 'RARA','RARA(var.2)', 'RARA::RXRA', 'PPARA::RXRA', 'HNF4A', 'VDR','RXRA::VDR', 'Ahr::Arnt')
+frequency <- c()
+for (p in 60:90){
+  longSites <- tibble(seq = character(),
+                    chrom = character(),
+                    start_coord = integer(),
+                    end_coord = integer(),
+                    ensembl = character(),
+                    de = integer(),
+                    tf = character()
+                    )
+  for (i in 1:length(tf)){
+    #Getting PWM from Jaspar2018
+    tf_pfm <- getMatrixByName(JASPAR2018, tf[i])
+    tf_pwm <- toPWM(tf_pfm)
+    TF <- tf[i]
+    for (j in 1:length(cyp_reg_data$seq)){
+      #Define Gene of interest
+      gene <- cyp_reg_data$reg_gene[j]
+      #Defining Peak Location
+      peak_chrom2 <- cyp_reg_data$dhs_chrom[j]
+      peak_start <- cyp_reg_data$dhs_start[j]
+      # Search sequence for relaxed match to each tf    
+      mySeqDNAString <- DNAString(c2s(cyp_reg_data$seq[j]))
+      siteSet <- searchSeq(tf_pwm, mySeqDNAString, 
+                           seqname = "seq1", min.score = paste0(as.character(p),"%"), strand = "*")
+      sites_in_myseq <- writeGFF3(siteSet)
+      de_sing <-  cyp_reg_data$de[j]
+      # If binding sites found, add all instances to dataframe of sites
+      numSites_in_myseq <- dim(sites_in_myseq)[1]
+      if (numSites_in_myseq > 0) {
+        cat("* Found ", numSites_in_myseq, " putative REs in peak # ", j, " \n")
+        
+        # Loop over DREs
+        for (k in 1:numSites_in_myseq) {
+          # Find start and end coords of site
+          start <- sites_in_myseq$start[k]
+          end <- sites_in_myseq$end[k]
+          
+          # Ignore sites too close to end of sequence string
+          if ((start <= 7) || (end >= length(mySeqDNAString) - 7)) {
+            next
+          }
+          
+          if (sites_in_myseq$strand[k] == "+") {
+            long_site <- mySeqDNAString[(start - 7):(end + 7)]
+          } else {
+            long_site <- reverseComplement(mySeqDNAString[(start - 7):(end + 7)])
+          }
+          #cat("DRE no. = ", j, "\n")
+          long_site_string <- toString(long_site)
+          start_long_site = (start - 7)
+          end_long_site = (end + 7)
+          temp_df <- data.frame(seq = long_site_string, 
+                                chrom = peak_chrom2,
+                                start_coord = start_long_site + peak_start, 
+                                end_coord = end_long_site + peak_start,
+                                ensembl = gene,
+                                de = de_sing,
+                                tf = TF
+                                )
+          longSites <- rbind(longSites, temp_df) 
+        }
+      }
+    }
+  }
+  frequency <- c(frequency,length(longSites$seq))
+}
+```
+Creating a Frequency Plot
+```{r}
+df <- tibble(
+  thresh = 60:90,
+  freq = frequency
+)
+ggplot(df,aes(x = thresh, y = freq)) +
+  geom_bar(fill = "#0073C2FF", stat = "identity")
+```
+Based on the Cutoff Analysis that I have performed, I suggest a match score of 82%
+```{r}
+tf <- c('Ahr::Arnt', 'ESR1', 'HNF4A', 'NR3C1', 'PPARA::RXRA', 'RARA', 'VDR')
+frequency <- c()
+
+longSites <- tibble(seq = character(),
+                  chrom = character(),
+                  start_coord = integer(),
+                  end_coord = integer(),
+                  ensembl = character(),
+                  de = integer(),
+                  tf = character()
+                  )
+for (i in 1:length(tf)){
+  #Getting PWM from Jaspar2018
+  tf_pfm <- getMatrixByName(JASPAR2018, tf[i])
+  tf_pwm <- toPWM(tf_pfm)
+  TF <- tf[i]
+  for (j in 1:length(cyp_reg_data$seq)){
+    #Define Gene of interest
+    gene <- cyp_reg_data$reg_gene[j]
+    #Defining Peak Location
+    peak_chrom2 <- cyp_reg_data$dhs_chrom[j]
+    peak_start <- cyp_reg_data$dhs_start[j]
+    # Search sequence for relaxed match to each tf    
+    mySeqDNAString <- DNAString(c2s(cyp_reg_data$seq[j]))
+    siteSet <- searchSeq(tf_pwm, mySeqDNAString, 
+                         seqname = "seq1", min.score = "80%", strand = "*")
+    sites_in_myseq <- writeGFF3(siteSet)
+    de_sing <-  cyp_reg_data$de[j]
+    # If binding sites found, add all instances to dataframe of sites
+    numSites_in_myseq <- dim(sites_in_myseq)[1]
+    if (numSites_in_myseq > 0) {
+      cat("* Found ", numSites_in_myseq, " putative REs in peak # ", j, " \n")
+      
+      # Loop over DREs
+      for (k in 1:numSites_in_myseq) {
+        # Find start and end coords of site
+        start <- sites_in_myseq$start[k]
+        end <- sites_in_myseq$end[k]
+        
+        # Ignore sites too close to end of sequence string
+        if ((start <= 7) || (end >= length(mySeqDNAString) - 7)) {
+          next
+        }
+        
+        if (sites_in_myseq$strand[k] == "+") {
+          long_site <- mySeqDNAString[(start - 7):(end + 7)]
+        } else {
+          long_site <- reverseComplement(mySeqDNAString[(start - 7):(end + 7)])
+        }
+        #cat("DRE no. = ", j, "\n")
+        long_site_string <- toString(long_site)
+        start_long_site = (start - 7)
+        end_long_site = (end + 7)
+        temp_df <- data.frame(seq = long_site_string, 
+                              chrom = peak_chrom2,
+                              start_coord = start_long_site + peak_start, 
+                              end_coord = end_long_site + peak_start,
+                              ensembl = gene,
+                              de = de_sing,
+                              tf = TF
+                              )
+        longSites <- rbind(longSites, temp_df) 
+      }
+    }
+  }
+}
+```
+ 
+
+Doing CAR Binding Site Search
+```{r}
+#Data used to check how well my CAR pwm is up to snuff
+mm10 <- TwoBitFile('../data/mm10.2bit')
+# Chip Exo Data Positions
+hCarChipBed <- '../data/NR_NarrowPeaks/CAR_PB_peaks.bed.gz'
+hCarChipBedColNames <- c('chrom', 'chromstart', 'chromend', 'name_site', 'score')
+hCarChipLoc <- read_tsv(hCarChipBed, col_names = hCarChipBedColNames)
+#Extracting sequences
+j <- head(hCarChipLoc)
+hCarChipSeqs <- c()
+locs <- GRanges(j$chrom, IRanges(j$chromstart, j$chromend))
+seqs <- as.character(import(mm10, which = locs))
+rm(j)
+hCarChipLoc$Seqs <- seqs
+rm(seqs)
+
+```
+
+```{r}
+CARSites <- tibble(seq = character(),
+                   peak = integer(),
+                    chrom = character(),
+                    start_coord = integer(),
+                    end_coord = integer(),
+                    tf = character()
+                    )
+for (i in 1:length(hCarChipLoc$chrom)){
+    #Defining Peak Location
+    peak_chrom2 <- hCarChipLoc$chrom[i]
+    peak_start <- hCarChipLoc$chromstart[i]
+    # Search sequence for relaxed match to each tf    
+    mySeqDNAString <- DNAString(c2s(hCarChipLoc$Seqs[i]))
+    siteSet <- searchSeq(pwm, mySeqDNAString, 
+                         seqname = "seq1", min.score = "70%", strand = "*")
+    sites_in_myseq <- writeGFF3(siteSet)
+    # If binding sites found, add all instances to dataframe of sites
+    numSites_in_myseq <- dim(sites_in_myseq)[1]
+    if (numSites_in_myseq > 0) {
+      # Loop over DREs
+      for (j in 1:numSites_in_myseq) {
+        # Find start and end coords of site
+        start <- sites_in_myseq$start[j]
+        end <- sites_in_myseq$end[j]
+        
+        # Ignore sites too close to end of sequence string
+        if ((start <= 7) || (end >= length(mySeqDNAString) - 7)) {
+          next
+        }
+        
+        if (sites_in_myseq$strand[j] == "+") {
+          long_site <- mySeqDNAString[(start - 7):(end + 7)]
+        } else {
+          long_site <- reverseComplement(mySeqDNAString[(start - 7):(end + 7)])
+        }
+        #cat("DRE no. = ", j, "\n")
+        long_site_string <- toString(long_site)
+        start_long_site = (start - 7)
+        end_long_site = (end + 7) 
+        temp_df <- data.frame(seq = long_site_string,
+                              peak = i,
+                              chrom = peak_chrom2,
+                              start_coord = start_long_site + peak_start, 
+                              end_coord = end_long_site + peak_start,
+                              tf = 'CAR:RXRA'
+                              )
+        CARSites <- rbind(CARSites, temp_df) 
+      }
+    }
+  }
+```
+
+So I got the data but I still need to test it. It seems pretty sensitive so I'm going to do an ROC curve on the data to see how well it performs on that specific data. I acutally should do this for all of my data to see how well all of them perform. This is to get a base line of the performance of these PWM's on these datasets. 
+
+This should be our standard of comparison for our machine learning models
+
+```{r}
+#Retrieving Benchmark data
+#Made of 200 Peaks with scores above 100, randomly selected
+#Exception for NR3C1 which has only 55 peaks, some of them low quality
+bench_dat_file <- '../data/NR_NarrowPeaks/testSetPwm_2.bed'
+bench_header <- c(nar_pek_var, 'TF')
+bench_dat <- read_tsv(bench_dat_file, col_names = bench_header)
+hg19locs <- bench_dat %>%
+  filter(TF == 'PPARA')
+mm10locs <- bench_dat %>%
+  filter(TF == 'CAR')
+hg38locs <- bench_dat %>%
+  filter(TF != 'CAR' & TF != 'PPARA')
+#Data analysis was performed on GChr38 so I will use the hg38.2bit file as my ref genome
+hg19 <- TwoBitFile('../data/hg19.2bit')
+mm10 <- TwoBitFile('../data/mm10.2bit')
+hg38 <- TwoBitFile('../data/hg38.2bit')
+#Will now retrieve sequences from reference. 
+hg19_locs <- GRanges(hg19locs$chrom, IRanges(hg19locs$chromstart, hg19locs$chromend))
+mm10_locs <- GRanges(mm10locs$chrom, IRanges(mm10locs$chromstart, mm10locs$chromend))
+hg38_locs <- GRanges(hg38locs$chrom, IRanges(hg38locs$chromstart, hg38locs$chromend))
+hg19locs$seqs <- as.character(import(hg19, which = hg19_locs))
+mm10locs$seqs <- as.character(import(mm10, which= mm10_locs))
+hg38locs$seqs <- as.character(import(hg38, which = hg38_locs))
+bench_dat <-  rbind(hg38locs, mm10locs, hg19locs)
+rm(hg38locs, hg19locs, mm10locs, hg19_locs, hg38_locs, mm10_locs)
+```
+
+```{r}
+#Creating data for ROCAUC plots
+tf <- c('ESR1', 'NR3C1', 'RARA','RARA(var.2)', 'RARA::RXRA', 'PPARA::RXRA', 'HNF4A', 'VDR','RXRA::VDR', 'Ahr::Arnt', 'CAR')
+tf_re <- c('ESR1', 'NR3C1', 'RARA', 'RARA', 'RARA:RXRA', 'PPARA::RXRA', 'HN4A', 'D3', 'RXRAA:D3', 'AHR', 'CAR')
+for (i in 1:length(tf)){
+  if tf != 
+  mutate(bench_dat)
+}
+#Example of how to create binary data
+mutate(bench_dat, true.val = ifelse(TF == 'ESR1', 1, 0))$true_val
+#Come back to this, it may come up later for benchmarking
+```
+I need to export some TFBS as PWM for my code
+```{r}
+nr2 <- 'Nuclear Receptor class'
+tf_pfm <- getMatrixByName(JASPAR2018, nr2)
+tf_pwm <- toPWM(tf_pfm)
+```
+

@@ -1,0 +1,264 @@
+---
+title: "Biophysical Prediction of HNF4A Binding Sites"
+output: html_notebook
+---
+
+```{r}
+library(DNAshapeR)
+library(biomaRt)
+library(dplyr)
+library(tidyverse)
+library(seqinr)
+library(Biostrings)
+library(TFBSTools)
+library(seqLogo)
+library(JASPAR2018)
+library(reshape2)
+library(ggplot2)
+library(nucleR)
+library(rtracklayer)
+library(bedr)
+library(coin)
+library(car)
+library(mltools)
+library(caret)
+library(InformationValue)
+library(plotROC)
+```
+
+We need to first load up the DNA accesibility data and the HNF4A binding data from bed files.
+To use this code you will need to have installed bedtools
+
+```{r}
+if(check.binary("bedtools")){
+  dnaseq <- read.table(gzfile('../data/liver_euchormatin/ENCFF955WVT_HEPG2_DNaseSeq.bed.gz'), header = FALSE, stringsAsFactors = FALSE)
+  hnf4a <- read.table(gzfile('../data/NR_NarrowPeaks/HN4A_peaks.bed'), header  = FALSE, stringsAsFactors = FALSE)
+  
+  #Check Files viability
+  is.a.valid <- is.valid.region(dnaseq)
+  is.b.valid <- is.valid.region(hnf4a)
+  
+  a <- dnaseq[is.a.valid,]
+  b <- hnf4a[is.b.valid,]
+  
+  #Sort Files for bed tools speedup
+  a.sort <- bedr.sort.region(a)
+  b.sort <- bedr.sort.region(b)
+  
+  #Remove Redundant Regions
+  a.merge <- bedr.merge.region(a.sort)
+  b.merge <- bedr.merge.region(b.sort)
+
+  #Doing Bed Arithmetic
+  #For this I will intersect hnf4a and the hepg2 availibility data and then subtract the hnf4a intersection (positives) from the hepg2 data to get the complement (negatives)
+  pos <- bedr.join.region(b.merge, a.merge)
+  neg <- bedr.subtract.region(a.merge, pos)
+  
+  #Removing non-overlapping rows in intersection
+  pos <- pos[!pos['start.b'] == -1, 1:4]
+}
+```
+Now that we have our data, we will now load the sequences.
+
+```{r}
+#Load Genome
+genome <- TwoBitFile('../data/hg38.2bit')
+
+#Load Locations
+pos_locs <- GRanges(pos$chr, IRanges(pos$start, pos$end))
+neg_locs <- GRanges(neg$chr, IRanges(neg$start, neg$end))
+
+#Add Sequence
+pos$seq <- as.character(import(genome, which = pos_locs))
+neg$seq <- as.character(import(genome, which = neg_locs))
+
+#Bin Sequences
+pos_bins <- c()
+for (seq in pos$seq){
+  string <- seq
+  num.char <- nchar(string) 
+  extra <- num.char%%100
+  start <- ceiling(extra/2)
+  if (num.char > 100){
+    starts <- seq(start,num.char-100, by=100)
+    pos_bins <- c(pos_bins, sapply(starts, function(i){
+      substr(string, i+1, i+100)
+      }
+      )
+      )
+  }
+}
+
+neg_bins <- c()
+for (seq in neg$seq){
+  string <- seq
+  num.char <- nchar(string) 
+  extra <- num.char%%100
+  start <- ceiling(extra/2)
+  if (num.char > 100){
+    starts <- seq(start,num.char-100, by=100)
+    neg_bins <- c(neg_bins, sapply(starts, function(i){
+      substr(string, i+1, i+100)
+      }
+      )
+      )
+  }
+}
+```
+
+
+We will start with the Average PWM feature
+
+```{r}
+tf <-  	"MA0114.2"
+pfm <-getMatrixByID(x =JASPAR2018, ID=tf)
+pwm <- toPWM(pfm)
+pwmScores <- c()
+for (seq in  pos_bins){
+  DNAStr <- DNAString(c2s(seq)) 
+  pwmSearch <- searchSeq(pwm, DNAStr, min.score = 0)
+  scores <- pwmSearch
+  pwmScore <- mean(scores)
+  pwmScores <- c(pwmScores, pwmScore)
+}
+
+positives <- data.frame(Sequence = pos_bins, avePWMScore = pwmScores)
+
+pwmScores <- c()
+for (seq in  neg_bins){
+  DNAStr <- DNAString(c2s(seq)) 
+  pwmSearch <- searchSeq(pwm, DNAStr, min.score = 0)
+  scores <- relScore(pwmSearch)
+  pwmScore <- mean(scores)
+  pwmScores <- c(pwmScores, pwmScore)
+}
+
+negatives <- data.frame(Sequence = neg_bins, avePWMScore = pwmScores)
+```
+
+Now we will build the DNAShape Model
+
+First We need to write our Sequences to a fasta file
+
+```{r}
+# Write Postive Sequences
+names <- c()
+for (i in 1:length(positives$Sequence)){
+ names <- c(names, paste0("HNF4A_POS_", as.character(i)))
+}
+
+write.fasta(as.list(as.character(positives$Sequence)), names, file.out = "Documents/sudin_pipeline/data/hnf4aPos.fasta")
+
+#Write Negative Sequences
+names <- c()
+for (i in 1:length(negatives$Sequence)){
+ names <- c(names, paste0("HNF4A_NEG_", as.character(i))) 
+}
+
+write.fasta(as.list(as.character(negatives$Sequence)), names, file.out = "Documents/sudin_pipeline/data/hnf4aNeg.fasta")
+```
+
+Now We Want to Encode the DNA as Shape Features
+```{r}
+#Getting DNAShapeFeatures for Postive Sequences
+posShape <- getShape("../data/hnf4aPos.fasta")
+#Getting DNA
+negShape <- getShape("../data/hnf4aNeg.fasta")
+```
+Getting the sequence shape vectors
+
+```{r}
+features <- c( "1-MGW","1-ProT", "1-Roll", "1-HelT")
+posShapeVec <- encodeSeqShape("../data/hnf4aPos.fasta", posShape, featureNames = features, normalize = TRUE)
+negShapeVec <- encodeSeqShape("../data/hnf4aNeg.fasta", posShape, featureNames = features, normalize = TRUE)
+```
+
+Getting the means for all these features
+
+```{r}
+positives$MGW <- rowMeans(posShape$MGW, na.rm = TRUE)
+positives$HelT <- rowMeans(posShape$HelT, na.rm = TRUE)
+positives$ProT <- rowMeans(posShape$ProT, na.rm = TRUE)
+positives$Roll <- rowMeans(posShape$Roll, na.rm = TRUE)
+positives$EP <- rowMeans(posShape$EP, na.rm = TRUE)
+
+negatives$MGW <- rowMeans(negShape$MGW, na.rm = TRUE)
+negatives$HelT <- rowMeans(negShape$HelT, na.rm = TRUE)
+negatives$ProT <- rowMeans(negShape$ProT, na.rm = TRUE)
+negatives$Roll <- rowMeans(negShape$Roll, na.rm = TRUE)
+negatives$EP <- rowMeans(negShape$EP, na.rm = TRUE) 
+```
+
+Previewing Signifigance Distributions Using Approximate Fisher-Pittman
+```{r}
+positives$y <- as.factor(1)
+negatives$y <- as.factor(0)
+
+concat <- rbind(positives, negatives)
+res1 <- oneway_test(HelT~y,concat[,2:8], distribution="approximate")
+res2 <- oneway_test(ProT~y,concat[,2:8], distribution="approximate")
+res3 <- oneway_test(MGW~y,concat[,2:8], distribution="approximate")
+res4 <- oneway_test(EP~y,concat[,2:8], distribution="approximate")
+res5 <- oneway_test(Roll~y,concat[,2:8], distribution="approximate")
+res6 <- oneway_test(avePWMScore~y,concat[,2:8], distribution="approximate")
+```
+
+Figuring Out Full model
+```{r}
+positives <- data.frame(posShapeVec)
+negatives <- data.frame(negShapeVec)
+
+positives$y <- 1
+negatives$y <- 0
+
+concat <- rbind(positives, negatives)
+```
+
+
+Benchmarking with Logistic Regression
+```{r}
+#Getting Training and Testing Sets
+set.seed(42)
+smp_size <-  floor(0.75*nrow(concat))
+train_ind <- sample(seq_len(nrow(concat)), size = smp_size)
+
+train <- concat[train_ind, ]
+test <- concat[-train_ind, ]
+```
+
+
+```{r}
+model <- glm(y~., data = train, family = binomial(link = logit))
+predicted <- plogis(predict(model, test))
+optCutOff <- optimalCutoff(test$y, predicted)[1] 
+```
+
+```{r}
+summary(model)
+```
+
+Check for multicolinearity
+```{r}
+vif(model)
+```
+
+This is worrisome for the model. Variance Inflation factors (vif) are well above 4 when I include all of the data.
+
+When I take away MGW and ProT, I bring the vif ~ 10, which is somewhat acceptable.
+
+MCC, confusion matrix, roc_curve
+```{r}
+confusionMatrix(test$y, predicted, threshold = optCutOff)
+```
+
+
+```{r}
+plotROC(test$y, predicted)
+```
+
+Try with RFC?
+
+```{r}
+
+```
+

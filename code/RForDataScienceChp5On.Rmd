@@ -1,0 +1,694 @@
+---
+title: "R for Data Sciences from Chapter 5"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+1/11/19
+Chapter 5: Data Transformation
+Setting Up Libraries
+
+```{r}
+library(tidyverse)
+library(nycflights13)
+library(dplyr)
+```
+
+dplyr overwrites and you need stats::filter() and stats::lag()
+
+```{r}
+flights
+```
+
+int for integers
+dbl stands for doubles, or real numbers
+chr stands for cahracter vectors, or strings
+dttm stands fo date-times (a date + time)
+lgl is logical 
+fctr factors, categorical data
+dates stands for dates
+
+
+dplyr basics
+
+pick by values: filter
+reorder: arrange
+pick variables: select
+create new variables from existing existing varaibles: mutate
+mutate in place: transmute
+
+```{r}
+filter(flights, month == 1, day == 1)
+```
+Here we filter for Jan 1 flights
+
+To set a variable and print results, run with a parentheses
+
+```{r}
+(dec25 <- filter(flights, month == 12, day == 25))
+```
+
+floating point numbers are not good with the  == boolean, so instead use the near() function
+
+```{r}
+sqrt(2)^2 == 2
+near(sqrt(2)^2, 2)
+```
+
+Since the computer uses an approximation fo the calculation, the boolean returns false. 
+
+& Intersection (Must be in X and Y)
+| Union (In X and Y or in just X or in just Y)
+! Composite (Not in X)
+
+```{r}
+filter(flights, month == 11| month == 12)
+```
+
+We can't use month == 11 | 12 as that transforms the parameter into a logical True/False Statement. The binary statement is understood as a 0/1 (Remember binary) and thus the statements turns into month == 1 because it is true that 11 union 12 are are contained in one another.
+
+e.g.
+```{r}
+filter(flights, month == 11|12)
+```
+So instead for shorthand you can use
+```{r}
+filter(flights, month %in% c(11,12))
+```
+The c stands for concatenate and creates a vector of numbers to be read by R. The %in% is a dplyr thing that I really don't know much about.
+
+Missing or unknown values are known as NA
+don't try to filter them with logicals
+Use is.na() unction instead
+
+
+
+Now go on to filtering variables through select
+
+```{r}
+select(flights,year, month, day)
+select(flights,year:day)
+select(flights, -(year:day))
+```
+
+There are a number of helper functions you can use within select():
+
+    starts_with("abc"): matches names that begin with "abc".
+
+    ends_with("xyz"): matches names that end with "xyz".
+
+    contains("ijk"): matches names that contain "ijk".
+
+    matches("(.)\\1"): selects variables that match a regular expression. This one matches any variables that contain repeated characters. You'll learn more about regular expressions in strings.
+
+    num_range("x", 1:3): matches x1, x2 and x3.
+
+```{r}
+rename(flights, tail_num = tailnum)
+```
+
+Then we also have hte helper everythin() which can help you move things to the begining of the dataframe
+
+```{r}
+select(flights, time_hour, air_time, everything())
+```
+
+Ecercises
+```{r}
+select(flights, time_hour, time_hour)
+```
+Add new variables with mutate
+
+```{r}
+flights_sml <- select(flights, year:day, ends_with("delay"), distance, air_time)
+
+mutate(flights_sml, gain = dep_delay - arr_delay,
+       speed = distance / air_time * 60)
+```
+```{r}
+mutate(flights_sml,
+       gain = dep_delay - arr_delay,
+       hours = air_time / 60,
+       gain_per_hour = gain / hours
+       )
+```
+
+to keep only the new variables we use transmute
+```{r}
+transmute(flights, 
+          gain = dep_delay - arr_delay,
+          hours = air_time / 60,
+          gain_per_hour = gain / hours
+          )
+```
+
+useful functions
+```{r}
+transmute(flights,
+          dep_time,
+          hour = dep_time %/% 100,
+          minute = dep_time %% 100
+          )
+```
+use log(), log2() and log10()
+
+Use log2 cause its easy to interpret
+
+Use lead and lag to find the next and previous value in the vector
+
+```{r}
+x <- 1:10
+lag(x)
+lead(x)
+```
+ Lastly summarise will collapse a data frame into a single row
+```{r}
+summarise(flights, delay = mean(dep_delay, na.rm = T))
+```
+ 
+```{r}
+by_day <- group_by(flights, year, month, day)
+summarise(by_day, delay = mean(dep_delay), na.rm = TRUE)
+```
+```{r}
+by_dest <- group_by(flights, dest)
+delay <- summarise(by_dest, 
+                   count = n(),
+                   dist = mean(distance, na.rm = TRUE),
+                   delay = mean(arr_delay, na.rm = TRUE)
+                   )
+delay <- filter(delay, count > 20, dest != "HNL")
+ggplot(data = delay, mapping = aes(x = dist, y = delay)) +
+  geom_point(aes(size = count), alpha = 1/3) + 
+  geom_smooth(se = FALSE)
+```
+
+Using a pipe
+```{r}
+delays <- flights %>%
+  group_by(dest) %>%
+  summarise(
+    count = n(),
+    dist = mean(distance, na.rm = TRUE),
+    delay = mean(arr_delay, na.rm = TRUE)
+  ) %>%
+  filter(count > 20, dest != "HNL")
+ggplot(data = delay, mapping = aes(x = dist, y = delay)) +
+  geom_point(aes(size = count), alpha = 1/3) + 
+  geom_smooth(se = FALSE)
+```
+
+Think of the pipe %>% as a "and Then"
+na.rm is to remove missing values
+
+Counts 
+```{r}
+not_cancelled <- flights %>% 
+  filter(!is.na(dep_delay), !is.na(arr_delay))
+
+not_cancelled %>% 
+  group_by(year, month, day) %>% 
+  summarise(mean = mean(dep_delay))
+```
+
+```{r}
+delays <-  not_cancelled %>% 
+  group_by(tailnum) %>%
+  summarise(
+    delay = mean(arr_delay)
+  )
+
+ggplot(data=delays, mapping = aes(x = delay)) + 
+  geom_freqpoly(binwidth = 10)
+```
+1/14/2019
+Chapter 7
+Cycle:
+Generate Questions
+Search for answers using visualising, transforming, and modeling
+Use what you learn ot refine your questions and/or generate new questions
+
+EDA cycle
+
+Prerequistites
+```{r}
+library(tidyverse)
+```
+A variable is a measurable quantity, quality, or property
+A values is the measure state of the variable
+An observation is a vector of measurement at similar conditions
+Tabular datas is a set of observations with the same variables
+
+Variation - tendency of a value to change from measurement to measurement
+
+A way to analyze patterns of variation is to graph the distribution
+
+Visualizing a a categorical data distribution
+```{r}
+ggplot(data = diamonds) + 
+  geom_bar(mapping = aes(x = cut))
+```
+
+You can do this manually with dplyr::count()
+```{r}
+diamonds %>%
+  count(cut)
+```
+
+Viualizing a continuous cariable 
+```{r}
+ggplot(data= diamonds) +
+  geom_histogram(mapping = aes(x = carat), binwidth = 0.5)
+```
+
+You can also do this manually 
+```{r}
+diamonds %>%
+  count(cut_width(carat, 0.5))
+```
+Binning here is done with the cut_width command
+
+changing the binwidth can reveal new patterns in the data
+e.g.
+```{r}
+smaller <- diamonds %>% 
+  filter(carat < 3)
+
+ggplot(data = smaller, mapping = aes(x = carat))+
+  geom_histogram(binwidth = 0.1)
+```
+
+It is recommended that if you want to overlay multiple histograms that you use geom_freqpoly instead.
+Geom_freqpoly does a histogram as a line plot
+
+```{r}
+ggplot(data = smaller, mapping = aes(x = carat, colour = cut )) +
+  geom_freqpoly(binwidth = 0.1)
+```
+
+Types of questions you want to be asking
+
+The trick is to look for anything unexpected:
+which values are most common? Why?
+Which values are rate? Does that match your expectations?
+Can you see any unusual patterns? What might explian them?
+
+Lets take a look at the following histogram
+```{r}
+ggplot(data = smaller, mapping = aes(x = carat)) +
+geom_histogram(binwidth = 0.01)
+```
+So we are seeing clusters in the data
+So a good question to ask is
+How are the ovservations within each cluster similar to each other?
+They have exponential distibutions
+How are the obserbations in separate clusters different from each other?
+How can you describe the clusters?
+What might the appearnce of clusters be misleading?
+
+Lookign for unusual values
+Sometimes looling fo outliers in histograms is difficult. So you want to zoom in on your data
+you can do this with coord_cartesian
+
+```{r}
+ggplot(diamonds) +
+geom_histogram(mapping = aes(x = y), binwidth = 0.5) + 
+coord_cartesian(ylim = c(0, 50))
+```
+
+This allows us to see that ther are some outliers aroud thirty and sixty
+
+So now we can pluck them out with dplyr
+```{r}
+unusual <-  diamonds %>%
+  filter(y  < 3 | y > 20) %>%
+  select(price, x, y, z) %>%
+  arrange(y)
+unusual
+```
+
+Missing vlaues
+
+To deal with un uaual values youj have two options
+one is to drop the entire row with the strange values:
+```{r}
+diamonds2 <- diamonds %>%
+  filter(between(y, 3, 20))
+```
+You probably shouldn't do this
+Insted change them to missing values
+Use mutate()
+
+```{r}
+diamonds2 <-diamonds %>%
+  mutate(y= ifelse(y < 3 | y > 20, NA, y))
+```
+
+ifelse has theree arguements
+test = boolean
+if true transform to second arguement
+if false transform to third arguement
+
+R will warn when removing rows due to missing values
+
+```{r}
+ggplot(data = diamonds2, mapping = aes(x = x, y = y)) +
+  geom_point()
+```
+Covariation 
+describes inter behavioral variation
+
+Stopped a 7.5.1
+Use box and whisker plots (or violin plots) to understand the covariation between variables
+
+```{r}
+ggplot(data = diamonds, mapping = aes(x = cut, y = price)) +
+  geom_violin()
+```
+
+```{r}
+ggplot(data = mpg) +
+  geom_boxplot(mapping = aes(x = reorder(class, hwy, FUN = median), y = hwy))+
+  coord_flip()
+```
+To visualize the covarition between categorical variables, you'll need to count the number of observations for each combinaiton.
+One way to do that is to rely on the built in geom_count()
+
+```{r}
+ggplot(data = diamonds) +
+  geom_count(mapping = aes(x = cut, y = color))
+```
+
+You can also look at it using dplyr
+```{r}
+diamonds %>%
+  count(color, cut)
+```
+
+Then you visualize it using a heatmap with geom_tile()
+```{r}
+diamonds %>%
+  count(color, cut) %>%
+  ggplot(mapping = aes(x = color, y = cut)) +
+  geom_tile(mapping = aes(fill = n))
+```
+
+With two continous variables
+You can do this with a scatter plot
+```{r}
+ggplot(data = diamonds) +
+  geom_point(mapping = aes(x = carat, y = price))
+```
+
+Scatter plots become harder to interpret with larger plots, and one way to overcome it is to use transparency
+```{r}
+ggplot(data = diamonds) +
+  geom_point(mapping = aes(x = carat, y = price), alpha = 1/ 100)
+```
+
+But transparency can be challenging for vey large datasets.
+Another way to over come this is using bining. This time, instead of binind in one dimension like in geom_histogram, we bin in two dimensions using geom_bin2d() and geom_hex()
+
+```{r}
+library(hexbin)
+```
+
+```{r}
+ggplot(data = smaller) +
+geom_bin2d(mapping = aes(x = carat, y = price))
+
+#installed hexbin
+ggplot(data = smaller) + 
+  geom_hex(mapping = aes(x = carat, y = price))
+```
+
+Another way you can deal with this is to treat one variable as a categorical one and create a continous boxplot
+```{r}
+ggplot(data = smaller, mapping = aes(x = carat, y = price)) +
+  geom_boxplot(mapping = aes(group = cut_width(carat, 0.1)))
+```
+
+cut_width(x, width) divides x into bins of width "width"
+Another apporach is to display the same number of points in each bin
+
+```{r}
+ggplot(data = smaller, mapping = aes(x = carat, y = price)) +
+  geom_boxplot(mapping = aes(group =  cut_number(carat, 20)))
+```
+
+Patterns in yor data provide clues about the relationships. Patterns are important in pointing out systematic relationships in your data.
+WHen you spot a pattern ask:
+could thid be due to random noise
+how can you describe the relationship implied by the pattern
+how strong is the relationship implied
+what other variables might affect the relationship
+does the relationship change if you look at individual subgroups
+
+e.g.
+```{r}
+ggplot(data =faithful) +
+  geom_point(mapping = aes(x = eruptions, y =waiting)) 
+```
+Notice that patterns help us figure out covariation between variables.
+You can think of it this way
+Varaition = Uncertainty
+Covariation = reduces uncertainty
+
+Models are tools for interpreting patterns from data.
+e.g.
+```{r}
+library(modelr)
+
+mod <- lm(log(price) ~log(carat), data = diamonds)
+
+diamonds2 <- diamonds %>% 
+  add_residuals(mod) %>%
+  mutate(resid = exp(resid))
+
+ggplot(data = diamonds2) +
+  geom_point(mapping = aes(x = carat, y = resid))
+```
+
+Chapter 9
+Introduction to Wrangling part of the workflow
+
+Import -> tidy -> transform
+
+tibbles -> a data frame
+data import -> disc to R
+tidy data -> consistently storing the data to make modeling easier
+
+Three Transform skills of interest:
+Relational data
+Strings
+Factosrs 
+Dates and times
+
+Chapter 10 Tibbles
+```{r}
+library(tidyverse)
+```
+Creating tibbles
+
+```{r}
+as_tibble(iris)
+```
+
+If we want to coerce a data frame to a tibble (as_tibble)
+
+To create a new tibble
+```{r}
+tibble(
+  x = 1:5,
+  y = 1,
+  z = x^2+y,
+)
+```
+
+Tibbles will do less than data.frame()
+tibbles will never change the type of input
+
+Tiblles can also have non-syntatic column names
+e.g.
+```{r}
+tb <- tibble(
+  ':)' = "smile",
+  ' ' = "space",
+  '2000' = 'number'
+)
+tb
+```
+
+You can also use transposed tibble or tribble
+```{r}
+tribble(
+  ~x, ~y, ~z,
+  "a", 2, 3.6,
+  "b", 1, 8.5
+)
+```
+
+Tibbles vs. data.frame
+
+Two main differences: printing and subsetting
+
+Printing:
+tibble refined printing form 
+
+```{r}
+tibble(
+  a = lubridate::now() + runif(1e3) * 86400,
+  b = lubridate::today() + runif(1e3) * 30,
+  c = 1:1e3,
+  d = runif(1e3),
+  e = sample(letters, 1e3, replace = TRUE)
+)
+```
+
+Tibbles are designed to not overwhelm the console.
+However, you will need to look at more data sometimes to get the full picture.
+
+So you can explicitly print the data
+
+```{r}
+nycflights13::flights %>%
+  print(n = 10, width = Inf)
+```
+
+Use Rstudio's built in dataviewer
+```{r}
+nycflights13::flights %>%
+  View()
+```
+
+
+Ao you can use $ and [[]] 
+
+```{r}
+df <- tibble(
+  x = runif(5),
+  y = rnorm(5)
+)
+
+# Extract by name
+df$x
+df[["x"]]
+
+#extract by position
+df[[1]]
+```
+
+To use thes in a pipe, you'll need to use a special placeholder .
+e.g.
+```{r}
+df %>% .$x
+df %>% .[["x"]]
+```
+tibbles are more strict and never try partial matching
+
+Interacting with older code
+When You are looking at older code you will sometimes find code that won't work with tibbles. So, you'll be foreced to use a datframe.
+To turn a tibble to a dataframe use
+as.data.frame()
+
+```{r}
+class(as.data.frame(tb))
+```
+
+Exercises
+
+1. use the class command, or look at how it prints
+```{r}
+?tibble::enframe
+```
+
+Chapter 11
+Data import
+
+```{r}
+library(tidyverse)
+```
+
+supplying an inline csv file
+
+```{r}
+read_csv("a,b,c
+         1,2,3
+         4,5,6")
+```
+
+In this case csv will use the first row as a colname vector
+
+Sometimes you don't want this to happen:
+1. sometimes there is metadata and you need to skip it.
+For this you use the need to use the skip = n parameter or the comment = '#'.
+
+```{r}
+read_csv("The first line of metadata
+  The second line of metadata
+  x,y,z
+  1,2,3", skip = 2)
+```
+```{r}
+read_csv("# A comment I want to skip
+  x,y,z
+  1,2,3", comment = "#")
+```
+
+2. The data might not have column names
+
+```{r}
+read_csv("1,2,3\n4,5,6", col_names = FALSE)
+```
+Here we use the col_names = FALSE paramter
+
+To specify missing values in your data use na parameter
+
+```{r}
+read_csv("a,b,c\n1,2,.", na = ".")
+```
+
+if you want super fast data.table:fread()
+
+Parsing a vecotor
+
+parse_*()
+
+```{r}
+str(parse_logical(c("T", "F", "NA")))
+str(parse_integer(c("1", "2", "3")))
+str(parse_date(c("2010-01-01","1979-10-14")))
+```
+na specifies which stirng should be treated as missing data
+
+```{r}
+parse_integer(c("1", "231", ".", "456"), na = '.')
+```
+
+Parsing failure
+```{r}
+x <- parse_integer(c("123", "345", "abc", "123.45"))
+```
+
+and the failures will appear as NA in output
+
+```{r}
+x
+```
+
+to see failures use the problems command
+```{r}
+problems(x)
+```
+
+guess encoding is a way to de novo search for an encoding if not provided one
+
